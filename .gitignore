@@ -1,0 +1,9 @@
+# Module build output
+*.ko**
+*.mod**
+*.o**
+*.symvers**
+
+# VSCode files
+/.vscode
+*.code-workspace
