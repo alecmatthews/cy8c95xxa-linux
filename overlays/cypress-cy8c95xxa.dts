@@ -1,0 +1,20 @@
+/* Device tree overlay for the cypress cy8c95xxa family of gpio expanders */
+/dts-v1/;
+/plugin/;
+
+/ {
+  compatible = "brcm,bcm2835";
+
+  fragment@0 {
+    target = <&i2c1>;
+
+    __overlay__ {
+      status = "okay";
+
+      cy8c9520a: ioexp@20 {
+        compatible = "cypress,cy8c9520a";
+        reg = <0x20>;
+      };
+    };
+  };
+};
