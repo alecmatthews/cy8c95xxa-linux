@@ -15,4 +15,4 @@ modules modules_install help clean:
 			M=$(PWD) $@
 
 .PHONY: deploy
-deploy: ;-scp *.ko overlays/cypress-cy8c95xxa.dts alec@192.168.16.203:
+deploy: all ;-scp *.ko overlays/cypress-cy8c95xxa.dts alec@192.168.16.203:

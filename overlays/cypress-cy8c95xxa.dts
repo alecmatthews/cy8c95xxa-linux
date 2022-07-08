@@ -14,6 +14,18 @@
       cy8c9520a: ioexp@20 {
         compatible = "cypress,cy8c9520a";
         reg = <0x20>;
+
+        gpio-controller;
+        #gpio-cells = <2>;
+
+        gpio-line-names = "GPIO_P0_0",
+                          "GPIO_P0_1",
+                          "GPIO_P0_2",
+                          "GPIO_P0_3",
+                          "GPIO_P0_4",
+                          "GPIO_P0_5",
+                          "GPIO_P0_6",
+                          "GPIO_P0_7";
       };
     };
   };

@@ -2,6 +2,10 @@
 #include <linux/module.h>
 #include <linux/miscdevice.h>
 
+#include <linux/gpio/driver.h>
+
+#define MODULE_NAME "gpio-cy8c95xxa"
+
 enum cypress_ioexpander_type {
     CYP_TYPE_20A,
     CYP_TYPE_40A,
@@ -11,8 +15,10 @@ enum cypress_ioexpander_type {
 struct ioexp_dev {
     struct i2c_client *c;
     struct miscdevice ioexp_miscdev;
+    struct gpio_chip chip;
     char *name;
 };
+
 
 #define REG_OUTPUT_PORT0 0x08
 
@@ -75,6 +81,60 @@ static const struct file_operations ioexp_fops = {
     .write = ioexp_write_file,
 };
 
+static int gpio_get_direction(struct gpio_chip *gc, unsigned int offset)
+{
+    dev_info(gc->parent, "%s", __func__);
+    return 0;
+}
+
+static int gpio_direction_input(struct gpio_chip *gc, unsigned int offset)
+{
+    dev_info(gc->parent, "%s", __func__);
+    return 0;
+}
+
+static int gpio_direction_output(struct gpio_chip *gc, unsigned int offset, int value)
+{
+    dev_info(gc->parent, "%s", __func__);
+    return 0;
+}
+
+static int gpio_get(struct gpio_chip *gc, unsigned int offset)
+{
+    dev_info(gc->parent, "%s", __func__);
+    return 0;
+}
+
+static void gpio_set(struct gpio_chip *gc, unsigned int offset, int value) {
+    dev_info(gc->parent, "%s", __func__);
+    return;
+}
+
+static int init_gpio_chip(struct ioexp_dev *ioexp)
+{
+    struct gpio_chip *chip = &ioexp->chip;
+
+    chip->owner = THIS_MODULE;
+    chip->label = MODULE_NAME;
+    chip->parent = &ioexp->c->dev;
+    chip->get_direction = gpio_get_direction;
+    chip->direction_input = gpio_direction_input;
+    chip->direction_output = gpio_direction_output;
+    chip->get = gpio_get;
+    chip->set = gpio_set;
+    chip->base = -1;
+    chip->ngpio = 8;
+    chip->can_sleep = true;
+    if (IS_ENABLED(CONFIG_OF_GPIO)) {
+        chip->of_node = chip->parent->of_node;
+        chip->of_gpio_n_cells = 2; // TODO: read from of
+    }
+
+    devm_gpiochip_add_data(chip->parent, chip, ioexp);
+
+    return 0;
+}
+
 static int cy8c95xxa_probe(struct i2c_client *client)
 {
     static u8 dev_count = 0;
@@ -101,6 +161,10 @@ static int cy8c95xxa_probe(struct i2c_client *client)
     }
 
     misc_register(&ioexp->ioexp_miscdev);
+
+    init_gpio_chip(ioexp);
+
+    dev_info(&client->dev, "Name: %s", dev_name(&client->dev));
 
     dev_info(&client->dev, "Probe finished");
     return 0;
