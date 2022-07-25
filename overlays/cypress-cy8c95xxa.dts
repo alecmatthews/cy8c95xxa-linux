@@ -25,7 +25,19 @@
                           "GPIO_P0_4",
                           "GPIO_P0_5",
                           "GPIO_P0_6",
-                          "GPIO_P0_7";
+                          "GPIO_P0_7",
+                          "GPIO_P1_0",
+                          "GPIO_P1_1",
+                          "GPIO_P1_2",
+                          "GPIO_P1_3",
+                          "GPIO_P1_4",
+                          "GPIO_P1_5",
+                          "GPIO_P1_6",
+                          "GPIO_P1_7",
+                          "GPIO_P2_0",
+                          "GPIO_P2_1",
+                          "GPIO_P2_2",
+                          "GPIO_P2_3";
       };
     };
   };

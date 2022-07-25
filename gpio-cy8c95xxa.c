@@ -17,12 +17,19 @@
 #define REG_OUT_BASE        0x08
 #define REG_INT_STATUS_BASE 0x10
 
+#define IN_REG(p) (REG_IN_BASE + p)
+#define OUT_REG(p) (REG_OUT_BASE + p)
+
 /* To modify the port first select it, then change the behavior with
  * the setting register.
  */
 #define REG_PORT_SELECT 0x18
 #define REG_INT_MASK    0x19
 #define REG_PIN_DIR     0x1C
+
+/* Chip properties */
+// TODO: this will be different for the other chip models!
+#define NGPIO 20
 
 enum cypress_ioexpander_type {
 	CYP_TYPE_20A = 20,
@@ -103,32 +110,104 @@ static const struct file_operations ioexp_fops = {
 	.write = ioexp_write_file,
 };
 
+// TODO: add offsets for larger chips
+static const u8 cy8c9520a_port_offset[] = {
+	0,
+	8,
+	16,
+};
+
+u8 gpio_to_port(unsigned gpio)
+{
+	u8 i = 0;
+	for (; i < ARRAY_SIZE(cy8c9520a_port_offset) - 1; i++) {
+		if (!(gpio / cy8c9520a_port_offset[i + 1]))
+			break;
+	}
+	return i;
+}
+
+u8 gpio_to_bit(unsigned gpio, u8 port) {
+	return gpio - cy8c9520a_port_offset[port];
+}
+
 static int gpio_get_direction(struct gpio_chip *gc, unsigned int offset)
 {
-	dev_info(gc->parent, "%s: offset: %u", __func__, offset);
+	u8 port = gpio_to_port(offset);
+	dev_info(gc->parent, "%s: port: %d, bit: %d", __func__, port, gpio_to_bit(offset, port));
 	return 0;
 }
 
 static int gpio_direction_input(struct gpio_chip *gc, unsigned int offset)
 {
-	dev_info(gc->parent, "%s: offset: %u", __func__, offset);
+	u8 port = gpio_to_port(offset);
+	dev_info(gc->parent, "%s: port: %d, bit: %d", __func__, port, gpio_to_bit(offset, port));
 	return 0;
 }
 
 static int gpio_direction_output(struct gpio_chip *gc, unsigned int offset, int value)
 {
-	dev_info(gc->parent, "%s: offset: %u, value: %d", __func__, offset, value);
+	int ret;
+	u8 port, bit, pins;
+	struct ioexp_dev *ioexp = gpiochip_get_data(gc);
+
+	port = gpio_to_port(offset);
+	bit = gpio_to_bit(offset, port);
+
+	dev_info(gc->parent, "%s: port: %d, bit: %d, value: %d", __func__, port, bit, value);
+
+	ret = i2c_smbus_write_byte_data(ioexp->c, REG_PORT_SELECT, port);
+	if (ret < 0) {
+		dev_err(gc->parent, "Can not select port %u!\n", port);
+		return ret;
+	}
+
+	ret = i2c_smbus_read_byte_data(ioexp->c, REG_PIN_DIR);
+	if (ret < 0) {
+		dev_err(gc->parent, "Could not read pin direction\n");
+		return -1;
+	}
+
+	pins = (u8)ret;
+	pins &= ~BIT(bit);
+
+	ret = i2c_smbus_write_byte_data(ioexp->c, REG_PIN_DIR, pins);
+	if (ret < 0) {
+		dev_err(gc->parent, "Could not write pin direction!\n");
+		return ret;
+	}
+
+	ret = i2c_smbus_read_byte_data(ioexp->c, OUT_REG(port));
+	if (ret < 0) {
+		dev_err(gc->parent, "Count not read output port!\n");
+		return ret;
+	}
+
+	if (value) {
+		pins = (u8)ret | BIT(bit);
+	} else {
+		pins = (u8)ret & ~BIT(bit);
+	}
+
+	ret = i2c_smbus_write_byte_data(ioexp->c, OUT_REG(port), pins);
+	if (ret < 0) {
+		dev_err(gc->parent, "Could not write output port!\n");
+		return ret;
+	}
+
 	return 0;
 }
 
 static int gpio_get(struct gpio_chip *gc, unsigned int offset)
 {
-	dev_info(gc->parent, "%s: offset: %u", __func__, offset);
+	u8 port = gpio_to_port(offset);
+	dev_info(gc->parent, "%s: port: %d, bit: %d", __func__, port, gpio_to_bit(offset, port));
 	return 0;
 }
 
 static void gpio_set(struct gpio_chip *gc, unsigned int offset, int value) {
-	dev_info(gc->parent, "%s: offset: %u, value: %d", __func__, offset, value);
+	u8 port = gpio_to_port(offset);
+	dev_info(gc->parent, "%s: port: %d, bit: %d, value: %d", __func__, port, gpio_to_bit(offset, port), value);
 	return;
 }
 
@@ -145,7 +224,7 @@ static int init_gpio_chip(struct ioexp_dev *ioexp)
 	chip->get = gpio_get;
 	chip->set = gpio_set;
 	chip->base = -1;
-	chip->ngpio = 8;
+	chip->ngpio = NGPIO;
 	chip->can_sleep = true;
 	if (IS_ENABLED(CONFIG_OF_GPIO)) {
 		chip->of_node = chip->parent->of_node;
