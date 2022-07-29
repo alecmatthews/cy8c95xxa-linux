@@ -2,7 +2,7 @@
 #
 # Author: Alec Matthews <me@alecmatthews.dev>
 
-obj-m += gpio-cy8c95xxa.o # TODO: add pinctrl driver
+obj-m += gpio-cy8c95xxa.o int-gpio.o # TODO: add pinctrl driver
 
 KERNEL_SRC ?= $(HOME)/rpi/linux
 
@@ -15,4 +15,4 @@ modules modules_install help clean:
 			M=$(PWD) $@
 
 .PHONY: deploy
-deploy: all ;-scp *.ko overlays/cypress-cy8c95xxa.dts alec@192.168.16.203:
+deploy: all ;-scp *.ko overlays/* alec@192.168.16.203:

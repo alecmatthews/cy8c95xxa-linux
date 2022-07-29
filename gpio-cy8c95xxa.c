@@ -3,6 +3,10 @@
 #include <linux/miscdevice.h>
 #include <linux/of_device.h>
 
+#include <linux/irq.h>
+
+#include <linux/mutex.h>
+
 #include <linux/gpio/driver.h>
 
 #define MODULE_NAME "gpio-cy8c95xxa"
@@ -43,11 +47,26 @@ enum cypress_ioexpander_type {
 	CYP_TYPE_60A = 60,
 };
 
+/**
+ * struct cy8c95xxa - status of the chip under control
+ * @out_cache: cache of the output registers
+ * @dir_cache: cache of the pin direction registers
+ * @chip: struct gpio_chip
+ * @lock: protects cache modifications
+ * @i2c_client: underlying bus
+ * @dev: underlying device
+ * @name: name of the connected device
+ */
 struct cy8c95xxa {
 	u8 out_cache[NPORTS];
 	u8 dir_cache[NPORTS];
+	u8 irq_mask[NPORTS];
+	u8 irq_mask_cache[NPORTS];
 
 	struct gpio_chip chip;
+
+	struct mutex lock;
+	struct mutex irq_lock;
 
 	struct i2c_client *i2c_client;
 	struct device *dev;
@@ -62,7 +81,7 @@ static const u8 cy8c9520a_port_offset[] = {
 	16,
 };
 
-u8 gpio_to_port(unsigned gpio)
+u8 gpio_to_port(unsigned long gpio)
 {
 	u8 i = 0;
 	for (; i < ARRAY_SIZE(cy8c9520a_port_offset) - 1; i++) {
@@ -72,7 +91,7 @@ u8 gpio_to_port(unsigned gpio)
 	return i;
 }
 
-u8 gpio_to_bit(unsigned gpio, u8 port)
+u8 gpio_to_bit(unsigned long gpio, u8 port)
 {
 	return gpio - cy8c9520a_port_offset[port];
 }
@@ -86,6 +105,137 @@ static int cyp_write(struct cy8c95xxa *cyp, u8 reg, u8 val)
 {
 	return i2c_smbus_write_byte_data(cyp->i2c_client, reg, val);
 }
+
+/**
+ * cy8c9520a_irq_mask - mask (disable) an irq
+ */
+static void cy8c9520a_irq_mask(struct irq_data *data)
+{
+	struct gpio_chip *gc = irq_data_get_irq_chip_data(data);
+	struct cy8c95xxa *cyp = gpiochip_get_data(gc);
+	unsigned long offset = data->hwirq;
+	u8 port, bit;
+
+	dev_info(cyp->dev, "%s: disable irq %lu", __func__, offset);
+
+	port = gpio_to_port(offset);
+	bit = gpio_to_bit(offset, port);
+	SET_BIT(bit, &cyp->irq_mask[port]);
+}
+
+/**
+ * cy8c9520a_irq_unmask - unmask (enable) and irq
+ */
+static void cy8c9520a_irq_unmask(struct irq_data *data)
+{
+	struct gpio_chip *gc = irq_data_get_irq_chip_data(data);
+	struct cy8c95xxa *cyp = gpiochip_get_data(gc);
+	unsigned long offset = data->hwirq;
+	u8 port, bit;
+
+	dev_info(cyp->dev, "%s: enable irq %lu", __func__, offset);
+
+	port = gpio_to_port(offset);
+	bit = gpio_to_bit(offset, port);
+	CLEAR_BIT(bit, &cyp->irq_mask[port]);
+}
+
+static int cy8c9520a_irq_set_type(struct irq_data *data, unsigned int flow_type)
+{
+	struct gpio_chip *gc = irq_data_get_irq_chip_data(data);
+	struct cy8c95xxa *cyp = gpiochip_get_data(gc);
+
+	if (!(flow_type == IRQ_TYPE_EDGE_BOTH
+	      || flow_type == IRQ_TYPE_EDGE_FALLING)) {
+		dev_err(cyp->dev, "irq: %d; unsupported type: %d", data->irq,
+			flow_type);
+		return -EINVAL;
+	}
+	return 0;
+}
+
+static void cy8c9520a_bus_lock(struct irq_data *data)
+{
+	struct gpio_chip *gc = irq_data_get_irq_chip_data(data);
+	struct cy8c95xxa *cyp = gpiochip_get_data(gc);
+
+	dev_info(cyp->dev, "%s: Lock bus", __func__);
+	mutex_lock(&cyp->irq_lock);
+}
+
+static void cy8c9520a_bus_sync_unlock(struct irq_data *data)
+{
+	struct gpio_chip *gc = irq_data_get_irq_chip_data(data);
+	struct cy8c95xxa *cyp = gpiochip_get_data(gc);
+	int i, ret;
+
+	dev_info(cyp->dev, "%s: sync irq mask", __func__);
+
+	for (i = 0; i < NPORTS; i++) {
+		if (cyp->irq_mask_cache[i] ^ cyp->irq_mask[i]) {
+			cyp->irq_mask_cache[i] = cyp->irq_mask[i];
+
+			ret = cyp_write(cyp, REG_PORT_SELECT, i);
+			if (ret < 0)
+				goto unlock;
+
+			ret =
+			    cyp_write(cyp, REG_INT_MASK,
+				      cyp->irq_mask_cache[i]);
+			if (ret < 0)
+				goto unlock;
+		}
+	}
+
+unlock:
+	mutex_unlock(&cyp->irq_lock);
+}
+
+static irqreturn_t cy8c9520a_irq(int irq, void *data)
+{
+	struct cy8c95xxa *cyp = data;
+	struct gpio_chip *gc = &cyp->chip;
+	u8 status[NPORTS], pending;
+	int ret, port, gpio, gpio_irq;
+
+	dev_info(cyp->dev, "%s irq entered", __func__);
+
+	ret =
+	    i2c_smbus_read_i2c_block_data(cyp->i2c_client, REG_INT_STATUS_BASE,
+					  NPORTS, status);
+	if (ret < 0)
+		memset(status, 0, ARRAY_SIZE(status));
+
+	ret = IRQ_NONE;
+	for (port = 0; port < NPORTS; port++) {
+		mutex_lock(&cyp->irq_lock);
+		pending = status[port] & (~cyp->irq_mask_cache[port]);
+		mutex_unlock(&cyp->irq_lock);
+
+		while (pending) {
+			ret = IRQ_HANDLED;
+			gpio = __ffs(pending);
+			pending &= ~BIT(gpio);
+			gpio_irq = cy8c9520a_port_offset[port] + gpio;
+
+			handle_nested_irq(irq_find_mapping
+					  (gc->irq.domain, gpio_irq));
+		}
+	}
+
+	return ret;
+}
+
+static struct irq_chip cy8c9520a_irq_chip = {
+	.name = "cy8c9520a-irq",
+	.irq_startup = NULL,	// TODO: lock gpio
+	.irq_shutdown = NULL,	// TODO: unlock gpio
+	.irq_mask = cy8c9520a_irq_mask,
+	.irq_unmask = cy8c9520a_irq_unmask,
+	.irq_set_type = cy8c9520a_irq_set_type,
+	.irq_bus_lock = cy8c9520a_bus_lock,
+	.irq_bus_sync_unlock = cy8c9520a_bus_sync_unlock,
+};
 
 static int gpio_get(struct gpio_chip *gc, unsigned int offset)
 {
@@ -108,18 +258,18 @@ static int gpio_get(struct gpio_chip *gc, unsigned int offset)
 static void gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
 {
 	int ret;
-	u8 port, bit;
+	u8 port, bit, data;
 	struct cy8c95xxa *cyp = gpiochip_get_data(gc);
 
 	port = gpio_to_port(offset);
 	bit = gpio_to_bit(offset, port);
 
-	if (value)
-		SET_BIT(bit, &cyp->out_cache[port]);
-	else
-		CLEAR_BIT(bit, &cyp->out_cache[port]);
+	mutex_lock(&cyp->lock);
+	assign_bit(bit, (unsigned long *)&cyp->out_cache[port], value);
+	data = cyp->out_cache[port];
+	mutex_unlock(&cyp->lock);
 
-	ret = cyp_write(cyp, OUT_REG(port), cyp->out_cache[port]);
+	ret = cyp_write(cyp, OUT_REG(port), data);
 	if (ret < 0)
 		dev_err(cyp->dev, "Could not set pin");
 }
@@ -127,25 +277,34 @@ static void gpio_set(struct gpio_chip *gc, unsigned int offset, int value)
 static int gpio_get_direction(struct gpio_chip *gc, unsigned int offset)
 {
 	u8 port, bit;
+	int line_direction;
 	struct cy8c95xxa *cyp = gpiochip_get_data(gc);
 
 	port = gpio_to_port(offset);
 	bit = gpio_to_bit(offset, port);
 
-	return cyp->dir_cache[port] & BIT(bit) ?
+	mutex_lock(&cyp->lock);
+
+	line_direction = cyp->dir_cache[port] & BIT(bit) ?
 	    GPIO_LINE_DIRECTION_IN : GPIO_LINE_DIRECTION_OUT;
+
+	mutex_unlock(&cyp->lock);
+
+	return line_direction;
 }
 
 static int gpio_direction_input(struct gpio_chip *gc, unsigned int offset)
 {
 	int ret;
-	u8 port, bit;
+	u8 port, bit, data;
 	struct cy8c95xxa *cyp = gpiochip_get_data(gc);
 
 	port = gpio_to_port(offset);
 	bit = gpio_to_bit(offset, port);
-
+	mutex_lock(&cyp->lock);
 	SET_BIT(bit, &cyp->dir_cache[port]);
+	data = cyp->dir_cache[port];
+	mutex_unlock(&cyp->lock);
 
 	ret = cyp_write(cyp, REG_PORT_SELECT, port);
 	if (ret < 0) {
@@ -153,7 +312,7 @@ static int gpio_direction_input(struct gpio_chip *gc, unsigned int offset)
 		return ret;
 	}
 
-	ret = cyp_write(cyp, REG_PIN_DIR, cyp->dir_cache[port]);
+	ret = cyp_write(cyp, REG_PIN_DIR, data);
 	if (ret < 0) {
 		dev_err(gc->parent, "Could not write pin direction");
 		return ret;
@@ -166,13 +325,15 @@ static int gpio_direction_output(struct gpio_chip *gc, unsigned int offset,
 				 int value)
 {
 	int ret;
-	u8 port, bit;
+	u8 port, bit, data;
 	struct cy8c95xxa *cyp = gpiochip_get_data(gc);
 
 	port = gpio_to_port(offset);
 	bit = gpio_to_bit(offset, port);
-
+	mutex_lock(&cyp->lock);
 	CLEAR_BIT(bit, &cyp->dir_cache[port]);
+	data = cyp->dir_cache[port];
+	mutex_unlock(&cyp->lock);
 
 	ret = cyp_write(cyp, REG_PORT_SELECT, port);
 	if (ret < 0) {
@@ -180,7 +341,7 @@ static int gpio_direction_output(struct gpio_chip *gc, unsigned int offset,
 		return ret;
 	}
 
-	ret = cyp_write(cyp, REG_PIN_DIR, cyp->dir_cache[port]);
+	ret = cyp_write(cyp, REG_PIN_DIR, data);
 	if (ret < 0) {
 		dev_err(gc->parent, "Could not write pin direction");
 		return ret;
@@ -215,14 +376,65 @@ static int init_gpio_chip(struct cy8c95xxa *cyp)
 	return 0;
 }
 
+static int init_gpio_irq(struct cy8c95xxa *cyp)
+{
+	struct gpio_chip *gc = &cyp->chip;
+	struct gpio_irq_chip *girq = &gc->irq;
+	u8 dummy[NPORTS];
+	int ret, i;
+
+	// clear interrupts
+	ret =
+	    i2c_smbus_read_i2c_block_data(cyp->i2c_client, REG_INT_STATUS_BASE,
+					  NPORTS, dummy);
+	if (ret < 0)
+		goto err;
+
+	// set defaults
+	memset(cyp->irq_mask, 0xFF, ARRAY_SIZE(cyp->irq_mask));
+	memset(cyp->irq_mask_cache, 0xFF, ARRAY_SIZE(cyp->irq_mask_cache));
+
+	// write defaults
+	for (i = 0; i < NPORTS; i++) {
+		ret = cyp_write(cyp, REG_PORT_SELECT, i);
+		if (ret < 0) {
+			dev_err(cyp->dev, "Couldn't select port");
+			goto err;
+		}
+
+		ret = cyp_write(cyp, REG_INT_MASK, cyp->irq_mask_cache[i]);
+		if (ret < 0) {
+			dev_err(cyp->dev, "Couldn't set mask");
+			goto err;
+		}
+	}
+
+	girq->chip = &cy8c9520a_irq_chip;
+	girq->parent_handler = NULL;
+	girq->num_parents = 0;
+	girq->parents = NULL;
+	girq->default_type = IRQ_TYPE_NONE;
+	girq->handler = handle_bad_irq;
+	girq->threaded = true;
+
+	ret =
+	    devm_request_threaded_irq(cyp->dev, cyp->i2c_client->irq, NULL,
+				      cy8c9520a_irq,
+				      IRQF_TRIGGER_RISING | IRQF_ONESHOT,
+				      dev_name(cyp->dev), cyp);
+
+err:
+	return ret;
+}
+
 static int cache_output_reg(struct cy8c95xxa *cyp)
 {
 	int ret;
 
-	ret =
-	    i2c_smbus_read_i2c_block_data(cyp->i2c_client, REG_OUT_BASE,
-					  ARRAY_SIZE(cyp->out_cache),
-					  cyp->out_cache);
+	ret = i2c_smbus_read_i2c_block_data(cyp->i2c_client,
+					    REG_OUT_BASE,
+					    ARRAY_SIZE(cyp->out_cache),
+					    cyp->out_cache);
 	if (ret < 0) {
 		dev_err(cyp->dev, "Could not cache output registers");
 		return ret;
@@ -263,6 +475,8 @@ static int cy8c95xxa_probe(struct i2c_client *client)
 	cyp->i2c_client = client;
 	cyp->dev = &client->dev;
 	cyp->name = client->name;
+	mutex_init(&cyp->lock);
+	mutex_init(&cyp->irq_lock);
 
 	i2c_set_clientdata(client, cyp);
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_SMBUS_BYTE_DATA
@@ -278,6 +492,8 @@ static int cy8c95xxa_probe(struct i2c_client *client)
 	ret = cache_port_dir(cyp);
 	if (ret < 0)
 		return ret;
+
+	init_gpio_irq(cyp);
 
 	init_gpio_chip(cyp);
 	return 0;

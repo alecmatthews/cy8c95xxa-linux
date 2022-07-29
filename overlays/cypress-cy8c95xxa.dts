@@ -18,6 +18,13 @@
         gpio-controller;
         #gpio-cells = <2>;
 
+        interrupt-controller;
+        #interrupt-cells = <2>;
+
+        interrupt-parent = <&gpio>;
+        /* Could also be 4: active high */
+        interrupts = <23 1>;
+
         gpio-line-names = "GPIO_P0_0",
                           "GPIO_P0_1",
                           "GPIO_P0_2",
@@ -39,6 +46,18 @@
                           "GPIO_P2_2",
                           "GPIO_P2_3";
       };
+    };
+  };
+
+  fragment@1 {
+    target = <&soc>;
+
+    __overlay__ {
+        int_gpio {
+            compatible = "htv,gpio_int";
+            interrupt-parent = <&cy8c9520a>;
+            interrupts = <1 3>;
+        };
     };
   };
 };

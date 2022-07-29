@@ -1,0 +1,19 @@
+/* Device tree overlay for the cypress cy8c95xxa family of gpio expanders */
+/dts-v1/;
+/plugin/;
+
+/ {
+  compatible = "brcm,bcm2835";
+
+  fragment@0 {
+    target = <&soc>;
+
+    __overlay__ {
+        int_gpio {
+            compatible = "htv,gpio_int";
+            interrupt-parent = <&ioexp>;
+            interrupts = <1 3>;
+        };
+    };
+  };
+};
