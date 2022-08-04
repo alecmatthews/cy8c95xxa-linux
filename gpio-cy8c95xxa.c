@@ -9,6 +9,11 @@
 
 #include <linux/gpio/driver.h>
 
+#include <linux/pinctrl/pinctrl.h>
+#include <linux/pinctrl/pinconf-generic.h>
+#include <linux/pinctrl/pinconf.h>
+#include <linux/pinctrl/consumer.h>
+
 #define MODULE_NAME "gpio-cy8c95xxa"
 
 /*
@@ -52,6 +57,7 @@ enum cypress_ioexpander_type {
  * @out_cache: cache of the output registers
  * @dir_cache: cache of the pin direction registers
  * @chip: struct gpio_chip
+ * @pinctrl: struct pinctrl_desc
  * @lock: protects cache modifications
  * @i2c_client: underlying bus
  * @dev: underlying device
@@ -65,6 +71,10 @@ struct cy8c95xxa {
 
 	struct gpio_chip chip;
 
+	struct pinctrl_desc pinctrl;
+	struct pinctrl_dev *pctldev;
+	struct pinctrl *pin_ctrl;
+
 	struct mutex lock;
 	struct mutex irq_lock;
 
@@ -72,6 +82,80 @@ struct cy8c95xxa {
 	struct device *dev;
 
 	char *name;
+};
+
+#define CY8C95XXA_PIN(a)	PINCTRL_PIN(a, "gpio" #a)
+struct pinctrl_pin_desc pinctrl_pins_20a[] = {
+	CY8C95XXA_PIN(0),
+	CY8C95XXA_PIN(1),
+	CY8C95XXA_PIN(2),
+	CY8C95XXA_PIN(3),
+	CY8C95XXA_PIN(4),
+	CY8C95XXA_PIN(5),
+	CY8C95XXA_PIN(6),
+	CY8C95XXA_PIN(7),
+	CY8C95XXA_PIN(8),
+	CY8C95XXA_PIN(9),
+	CY8C95XXA_PIN(10),
+	CY8C95XXA_PIN(11),
+	CY8C95XXA_PIN(12),
+	CY8C95XXA_PIN(13),
+	CY8C95XXA_PIN(14),
+	CY8C95XXA_PIN(15),
+	CY8C95XXA_PIN(16),
+	CY8C95XXA_PIN(17),
+	CY8C95XXA_PIN(18),
+	CY8C95XXA_PIN(19),
+};
+
+static int cy8c95xxa_pin_config_get(struct pinctrl_dev *pctldev,
+				    unsigned pin, unsigned long *config)
+{
+	return -ENOTSUPP;
+}
+
+static int cy8c95xxa_pin_config_set(struct pinctrl_dev *pctldev,
+				    unsigned pin,
+				    unsigned long *configs,
+				    unsigned num_configs)
+{
+	struct cy8c95xxa *cyp = pinctrl_dev_get_drvdata(pctldev);
+	enum pin_config_param param;
+	int i;
+
+	dev_info(cyp->dev, "For pin %d the parameters are:", pin);
+
+	// print all configs...
+	for (i = 0; i < num_configs; i++) {
+		param = pinconf_to_config_param(configs[i]);
+		dev_info(cyp->dev, "\tparameter: %d", param);
+	}
+
+	return 0;
+}
+
+static const struct pinconf_ops cy8_pinconf_ops = {
+	.pin_config_get = cy8c95xxa_pin_config_get,
+	.pin_config_set = cy8c95xxa_pin_config_set,
+	.is_generic = true,
+};
+
+static int cy8c95xxa_get_groups_count(struct pinctrl_dev *pctrldev)
+{
+	return 0;
+}
+
+static const char *cy8c95xxa_get_group_name(struct pinctrl_dev *pctldev,
+					    unsigned selector)
+{
+	return NULL;
+}
+
+static const struct pinctrl_ops cy8_pinctrl_ops = {
+	.get_groups_count = cy8c95xxa_get_groups_count,
+	.get_group_name = cy8c95xxa_get_group_name,
+	.dt_node_to_map = pinconf_generic_dt_node_to_map_all,
+	.dt_free_map = pinconf_generic_dt_free_map,
 };
 
 // TODO: add offsets for larger chips
@@ -496,6 +580,28 @@ static int cy8c95xxa_probe(struct i2c_client *client)
 	init_gpio_irq(cyp);
 
 	init_gpio_chip(cyp);
+
+	cyp->pinctrl.name = "cyp8c95xxa-pinctrl";
+	cyp->pinctrl.pctlops = &cy8_pinctrl_ops;
+	cyp->pinctrl.confops = &cy8_pinconf_ops;
+	cyp->pinctrl.pins = pinctrl_pins_20a;
+	cyp->pinctrl.npins = ARRAY_SIZE(pinctrl_pins_20a);
+	cyp->pinctrl.owner = THIS_MODULE;
+
+	ret =
+	    devm_pinctrl_register_and_init(cyp->dev, &cyp->pinctrl, cyp,
+					   &cyp->pctldev);
+	if (ret != 0) {
+		dev_err(cyp->dev, "Can't register pin controller");
+		return ret;
+	}
+
+	ret = pinctrl_enable(cyp->pctldev);
+	if (ret != 0) {
+		dev_err(cyp->dev, "Could not enable pin controller");
+		return ret;
+	}
+
 	return 0;
 }
 

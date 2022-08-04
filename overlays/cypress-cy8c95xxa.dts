@@ -45,6 +45,16 @@
                           "GPIO_P2_1",
                           "GPIO_P2_2",
                           "GPIO_P2_3";
+
+        pinctrl-names = "default";
+        pinctrl-0 = <&test_pins>;
+
+        test_pins: pinctrl-test {
+          gpio-test {
+            pins = "gpio6", "gpio7";
+            drive-open-drain;
+          };
+        };
       };
     };
   };
