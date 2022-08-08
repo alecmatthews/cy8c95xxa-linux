@@ -49,9 +49,20 @@
         pinctrl-names = "default";
         pinctrl-0 = <&test_pins>;
 
+        cy8c9520a_pwm: pwm {
+          #pwm-cells = <2>;
+        };
+
         test_pins: pinctrl-test {
+          pwm-test {
+            pins = "gpio7";
+            function = "pwm";
+            drive-open-drain;
+          };
+
           gpio-test {
-            pins = "gpio6", "gpio7";
+            pins = "gpio5",
+                   "gpio6";
             drive-open-drain;
           };
         };
